@@ -6,6 +6,7 @@ from typing import Optional, List
 import time
 import logging
 from datetime import date, datetime
+from sqlalchemy import func
 
 from app.models.database import get_db
 from app.models.entities import Entity, Alias, Address, Document, Client, ApiUsage, UpdateLog
@@ -285,11 +286,13 @@ async def get_client_info(
         today = date.today()
         month_start = today.replace(day=1)
         
-        queries_used = db.query(ApiUsage).filter(
+        # CORREGIDO: Usar func.sum() en lugar de count()
+        queries_used_result = db.query(func.sum(ApiUsage.queries_count)).filter(
             ApiUsage.client_id == client.client_id,
             ApiUsage.query_date >= month_start
-        ).count()
+        ).scalar()
         
+        queries_used = int(queries_used_result) if queries_used_result is not None else 0
         queries_remaining = max(0, client.monthly_quota - queries_used) if client.monthly_quota > 0 else -1
         
         return ClientInfo(

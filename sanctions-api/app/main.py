@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 import logging
 from datetime import datetime, date
+from sqlalchemy import func
 
 from app.models.database import get_db
 from app.core.config import settings
 from app.api.routes import router as api_router
 from app.api.etl_routes import etl_router
+from app.api.admin_routes import admin_router  # NUEVO: Importar rutas de admin
 from app.models.entities import ApiUsage, Client
 
 # Configurar logging
@@ -38,7 +40,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Middleware para logging de requests
+# NUEVO: Middleware para rastrear uso de la API
+@app.middleware("http")
+async def track_api_usage(request, call_next):
+    """Middleware para registrar uso de la API"""
+    
+    # Procesar la request
+    response = await call_next(request)
+    
+    # Solo rastrear endpoints de búsqueda exitosos
+    if (request.url.path.startswith(f"{settings.api_v1_prefix}/search") and 
+        response.status_code == 200 and
+        request.method == "GET"):
+        
+        try:
+            # Obtener API Key
+            api_key = request.headers.get("X-API-Key")
+            
+            if api_key:
+                # Crear nueva sesión de DB para el middleware
+                from app.models.database import SessionLocal
+                db = SessionLocal()
+                
+                try:
+                    # Buscar cliente
+                    client = db.query(Client).filter(
+                        Client.api_key == api_key,
+                        Client.is_active == True
+                    ).first()
+                    
+                    if client:
+                        today = date.today()
+                        
+                        # Buscar registro existente para hoy
+                        usage_record = db.query(ApiUsage).filter(
+                            ApiUsage.client_id == client.client_id,
+                            ApiUsage.query_date == today
+                        ).first()
+                        
+                        if usage_record:
+                            # Incrementar contador existente
+                            usage_record.queries_count += 1
+                        else:
+                            # Crear nuevo registro para hoy
+                            usage_record = ApiUsage(
+                                client_id=client.client_id,
+                                query_date=today,
+                                queries_count=1,
+                                plan_type=client.plan_type,
+                                endpoint=str(request.url.path)
+                            )
+                            db.add(usage_record)
+                        
+                        db.commit()
+                        logger.info(f"Uso registrado para cliente: {client.client_id} (total hoy: {usage_record.queries_count})")
+                        
+                except Exception as e:
+                    logger.error(f"Error registrando uso: {e}")
+                    db.rollback()
+                finally:
+                    db.close()
+                    
+        except Exception as e:
+            logger.error(f"Error en middleware de tracking: {e}")
+    
+    return response
+
+# Middleware para logging de requests (mantener el existente)
 @app.middleware("http")
 async def log_requests(request, call_next):
     start_time = datetime.now()
@@ -52,7 +120,7 @@ async def log_requests(request, call_next):
     )
     return response
 
-# Función para validar API Key
+# Función para validar API Key (mantener la existente)
 async def validate_api_key(
     x_api_key: str = Header(..., description="API Key para autenticación"),
     db: Session = Depends(get_db)
@@ -77,10 +145,10 @@ async def validate_api_key(
         month_start = today.replace(day=1)
         
         # Contar uso del mes actual
-        monthly_usage = db.query(ApiUsage).filter(
+        monthly_usage = db.query(func.sum(ApiUsage.queries_count)).filter(
             ApiUsage.client_id == client.client_id,
             ApiUsage.query_date >= month_start
-        ).count()
+        ).scalar() or 0
         
         if monthly_usage >= client.monthly_quota:
             raise HTTPException(
@@ -90,14 +158,14 @@ async def validate_api_key(
     
     return client
 
-# Incluir rutas de la API
+# Incluir rutas de la API (mantener las existentes)
 app.include_router(
     api_router,
     prefix=settings.api_v1_prefix,
     dependencies=[Depends(validate_api_key)]
 )
 
-# Incluir rutas de ETL (solo para admins)
+# Incluir rutas de ETL (mantener existentes)
 app.include_router(
     etl_router,
     prefix=f"{settings.api_v1_prefix}/etl",
@@ -105,7 +173,14 @@ app.include_router(
     dependencies=[Depends(validate_api_key)]
 )
 
-# Ruta raíz
+# NUEVO: Incluir rutas de administración (SIN validación de API Key normal)
+app.include_router(
+    admin_router,
+    prefix=settings.api_v1_prefix,
+    tags=["Administration"]
+)
+
+# Rutas básicas (mantener las existentes)
 @app.get("/")
 async def root():
     return {
@@ -115,7 +190,6 @@ async def root():
         "status": "active"
     }
 
-# Ruta de health check
 @app.get("/health")
 async def health_check():
     return {
@@ -124,7 +198,6 @@ async def health_check():
         "version": settings.version
     }
 
-# Ruta para información de la API
 @app.get("/info")
 async def api_info():
     return {
@@ -135,12 +208,13 @@ async def api_info():
         "endpoints": {
             "search": f"{settings.api_v1_prefix}/search",
             "entity": f"{settings.api_v1_prefix}/entity/{{id}}",
-            "stats": f"{settings.api_v1_prefix}/stats"
+            "stats": f"{settings.api_v1_prefix}/stats",
+            "admin": f"{settings.api_v1_prefix}/admin"  # NUEVO
         },
-        "authentication": "API Key required in X-API-Key header"
+        "authentication": "API Key required in X-API-Key header (X-Admin-Key for admin endpoints)"
     }
 
-# Manejo de errores
+# Manejo de errores (mantener existentes)
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
     return JSONResponse(

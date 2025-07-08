@@ -13,8 +13,8 @@ from pathlib import Path
 # Agregar el directorio raíz al path
 sys.path.append(str(Path(__file__).parent))
 
-from app.etl.ofac_parser import run_ofac_update
-from app.etl.un_parser import run_un_update
+from app.etl.ofac_parser_final import OFACParserFinal, run_ofac_update
+from app.etl.un_parser_final import  UNParserFinal, run_un_update
 from app.etl.scheduler import ETLScheduler
 from app.models.database import SessionLocal
 from app.models.entities import Entity, UpdateLog

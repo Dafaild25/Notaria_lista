@@ -104,11 +104,12 @@ async def get_all_clients(
         month_start = today.replace(day=1)
         
         for client in clients:
-            # Contar consultas del mes actual
-            queries_used = db.query(ApiUsage).filter(
+            # Sumar consultas del mes actual (manejar caso sin registros)
+            queries_used_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client.client_id,
                 ApiUsage.query_date >= month_start
-            ).count()
+            ).scalar()
+            queries_used = int(queries_used_result) if queries_used_result is not None else 0
             
             queries_remaining = max(0, client.monthly_quota - queries_used) if client.monthly_quota > 0 else -1
             
@@ -213,28 +214,32 @@ async def get_usage_statistics(
         result = []
         
         for client in clients:
-            # Consultas hoy
-            queries_today = db.query(ApiUsage).filter(
+            # Consultas hoy (manejar casos sin registros)
+            queries_today_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client.client_id,
                 ApiUsage.query_date == today
-            ).count()
+            ).scalar()
+            queries_today = int(queries_today_result) if queries_today_result is not None else 0
             
             # Consultas esta semana
-            queries_this_week = db.query(ApiUsage).filter(
+            queries_this_week_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client.client_id,
                 ApiUsage.query_date >= week_start
-            ).count()
+            ).scalar()
+            queries_this_week = int(queries_this_week_result) if queries_this_week_result is not None else 0
             
             # Consultas este mes
-            queries_this_month = db.query(ApiUsage).filter(
+            queries_this_month_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client.client_id,
                 ApiUsage.query_date >= month_start
-            ).count()
+            ).scalar()
+            queries_this_month = int(queries_this_month_result) if queries_this_month_result is not None else 0
             
-            # Última consulta
+            # Última consulta (fecha más reciente con consultas > 0)
             last_usage = db.query(ApiUsage).filter(
-                ApiUsage.client_id == client.client_id
-            ).order_by(desc(ApiUsage.query_timestamp)).first()
+                ApiUsage.client_id == client.client_id,
+                ApiUsage.queries_count > 0
+            ).order_by(desc(ApiUsage.query_date)).first()
             
             # Calcular utilización de quota
             quota_utilization = 0.0
@@ -248,7 +253,7 @@ async def get_usage_statistics(
                 queries_today=queries_today,
                 queries_this_week=queries_this_week,
                 queries_this_month=queries_this_month,
-                last_query=last_usage.query_timestamp if last_usage else None,
+                last_query=last_usage.query_date if last_usage else None,
                 quota_utilization=min(quota_utilization, 100.0)
             ))
         
@@ -276,20 +281,23 @@ async def get_api_usage_overview(
         total_clients = db.query(Client).count()
         active_clients = db.query(Client).filter(Client.is_active == True).count()
         
-        total_queries_today = db.query(ApiUsage).filter(
+        # Estadísticas generales (manejar casos sin registros)
+        total_queries_today_result = db.query(func.sum(ApiUsage.queries_count)).filter(
             ApiUsage.query_date == today
-        ).count()
+        ).scalar()
+        total_queries_today = int(total_queries_today_result) if total_queries_today_result is not None else 0
         
-        total_queries_this_month = db.query(ApiUsage).filter(
+        total_queries_this_month_result = db.query(func.sum(ApiUsage.queries_count)).filter(
             ApiUsage.query_date >= month_start
-        ).count()
+        ).scalar()
+        total_queries_this_month = int(total_queries_this_month_result) if total_queries_this_month_result is not None else 0
         
         # Top 5 clientes por uso este mes
         top_clients_query = db.query(
             Client.client_id,
             Client.client_name,
             Client.plan_type,
-            func.count(ApiUsage.id).label('query_count')
+            func.sum(ApiUsage.queries_count).label('query_count')
         ).join(
             ApiUsage, Client.client_id == ApiUsage.client_id
         ).filter(
@@ -305,19 +313,22 @@ async def get_api_usage_overview(
             # Obtener más detalles para cada top client
             client = db.query(Client).filter(Client.client_id == client_data.client_id).first()
             
-            queries_today = db.query(ApiUsage).filter(
+            queries_today_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client_data.client_id,
                 ApiUsage.query_date == today
-            ).count()
+            ).scalar()
+            queries_today = int(queries_today_result) if queries_today_result is not None else 0
             
-            queries_this_week = db.query(ApiUsage).filter(
+            queries_this_week_result = db.query(func.sum(ApiUsage.queries_count)).filter(
                 ApiUsage.client_id == client_data.client_id,
                 ApiUsage.query_date >= today - timedelta(days=7)
-            ).count()
+            ).scalar()
+            queries_this_week = int(queries_this_week_result) if queries_this_week_result is not None else 0
             
             last_usage = db.query(ApiUsage).filter(
-                ApiUsage.client_id == client_data.client_id
-            ).order_by(desc(ApiUsage.query_timestamp)).first()
+                ApiUsage.client_id == client_data.client_id,
+                ApiUsage.queries_count > 0
+            ).order_by(desc(ApiUsage.query_date)).first()
             
             quota_utilization = 0.0
             if client and client.monthly_quota > 0:
@@ -330,7 +341,7 @@ async def get_api_usage_overview(
                 queries_today=queries_today,
                 queries_this_week=queries_this_week,
                 queries_this_month=client_data.query_count,
-                last_query=last_usage.query_timestamp if last_usage else None,
+                last_query=last_usage.query_date if last_usage else None,
                 quota_utilization=min(quota_utilization, 100.0)
             ))
         
@@ -339,13 +350,12 @@ async def get_api_usage_overview(
             ApiUsage.query_date,
             ApiUsage.client_id,
             Client.client_name,
-            func.count(ApiUsage.id).label('query_count')
+            ApiUsage.queries_count
         ).join(
             Client, ApiUsage.client_id == Client.client_id
         ).filter(
-            ApiUsage.query_date >= today - timedelta(days=7)
-        ).group_by(
-            ApiUsage.query_date, ApiUsage.client_id, Client.client_name
+            ApiUsage.query_date >= today - timedelta(days=7),
+            ApiUsage.queries_count > 0
         ).order_by(
             desc(ApiUsage.query_date)
         ).limit(10).all()
@@ -355,7 +365,7 @@ async def get_api_usage_overview(
                 date=activity.query_date,
                 client_id=activity.client_id,
                 client_name=activity.client_name,
-                query_count=activity.query_count,
+                query_count=activity.queries_count,
                 endpoint="/search"  # Por ahora fijo, después puedes agregar el campo endpoint
             ) for activity in recent_activities_query
         ]
